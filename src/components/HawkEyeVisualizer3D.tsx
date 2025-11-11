@@ -93,6 +93,45 @@ const BONES: [number, number][] = [
 const HOME_BASE = new THREE.Vector3(-1, 0, 0); // pitcher->catcher along -X
 const SMOOTH_ALPHA = 0.35;
 
+function normalizeRoleForTrack(raw: any): string {
+  if (raw == null) return "unknown";
+
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed) return "unknown";
+    const lower = trimmed.toLowerCase();
+    if (lower.includes("pitch")) return "pitcher";
+    if (lower.includes("batter")) return "batter";
+    if (lower.includes("hitter")) return "hitter";
+    if (lower.includes("bat")) return "batter";
+    if (lower === "p") return "pitcher";
+    if (lower === "h" || lower === "rh" || lower === "lh") return "hitter";
+    if (lower === "b") return "batter";
+    return lower;
+  }
+
+  if (typeof raw === "number" || typeof raw === "boolean") {
+    return normalizeRoleForTrack(String(raw));
+  }
+
+  if (typeof raw === "object") {
+    return normalizeRoleForTrack(
+      raw.name ??
+        raw.label ??
+        raw.title ??
+        raw.description ??
+        raw.heId ??
+        raw.abbr ??
+        raw.code ??
+        raw.type ??
+        raw.id ??
+        ""
+    );
+  }
+
+  return "unknown";
+}
+
 function wrap180(d: number) {
   if (!isFinite(d)) return d;
   while (d > 180) d -= 360;
@@ -622,6 +661,10 @@ async function onFiles(fs: FileList | null) {
       setDebug(`Parse error in ${f.name}: ${String(e?.message || e)}`);
     }
   }
+
+  all.forEach((t) => {
+    (t as any).role = normalizeRoleForTrack((t as any).role);
+  });
 
   // Your visualizer only wants pitcher/hitter roles
   const playable = all.filter((t) =>
@@ -1201,9 +1244,18 @@ async function onFiles(fs: FileList | null) {
           onChange={(e) => { setTi(+e.target.value); setFi(0); }}
           style={{ background: "#0f172a", color: "#e2e8f0", border: "1px solid #1e293b", borderRadius: 8, padding: "6px 8px" }}
         >
-          {tracks.map((t: any, i: number) => (
-            <option key={i} value={i}>[{t.role}] {t.name ?? t.personId ?? t.trackId ?? `Track ${i + 1}`}</option>
-          ))}
+          {tracks.map((t: any, i: number) => {
+            const roleText =
+              typeof t.role === "string" && t.role.length
+                ? t.role.charAt(0).toUpperCase() + t.role.slice(1)
+                : "Unknown";
+            const label = t.name ?? t.personId ?? t.trackId ?? `Track ${i + 1}`;
+            return (
+              <option key={i} value={i}>
+                [{roleText}] {label}
+              </option>
+            );
+          })}
         </select>
 
         <div style={{ display: "flex", gap: 8, fontSize: 12, opacity: 0.85, alignItems:"center", flexWrap:"wrap" }}>
