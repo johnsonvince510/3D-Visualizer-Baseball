@@ -1,0 +1,431 @@
+// parseHawkEye.ts
+// A robust parser for Hawk-Eye-like JSON exports used in the UGA 3D visualizer.
+// It tolerates multiple schema variants and normalizes output for the app.
+//
+// Export:
+//   export function parseHawkEyeJson(root: any): ParsedTrack[]
+//
+// Returned shape (per track):
+//   {
+//     role: "pitcher" | "batter" | "hitter" | "unknown",
+//     name?: string,
+//     personId?: string | number,
+//     handedness?: { throwing?: "R"|"L"|"?"; batting?: "R"|"L"|"?"; },
+//     frames: Array<{ time: number; joints: Record<string, [number,number,number]> }>,
+//     meta?: {
+//       pitch?: { velocityMph?: number; ivb?: number; hb?: number; extensionFt?: number; },
+//       swing?: {
+//         exitVelocityMph?: number; launchAngleDeg?: number;
+//         batSpeedMph?: number; swingPathTiltDeg?: number;
+//         attackDirectionDeg?: number; attackAngleDeg?: number;
+//       }
+//     }
+//   }
+//
+// Notes:
+// - We search common paths for samples/people/joints in different vendor dumps.
+// - If explicit times are missing, we assume 120 FPS and synthesize times.
+// - Units are normalized: velocity in mph, extension in feet.
+// - IVB/HB pulled as-is (assumed inches if provided as such; if meters, we convert to inches if unit hints exist).
+// - We do not throw on partial data; we best-effort fill what we can.
+
+export type V3 = [number, number, number];
+
+export interface ParsedTrack {
+  role: "pitcher" | "batter" | "hitter" | "unknown";
+  name?: string;
+  personId?: string | number;
+  handedness?: { throwing?: "R"|"L"|"?"; batting?: "R"|"L"|"?"; };
+  frames: Array<{ time: number; joints: Record<string, V3> }>;
+  meta?: {
+    pitch?: { velocityMph?: number; ivb?: number; hb?: number; extensionFt?: number; };
+    swing?: {
+      exitVelocityMph?: number; launchAngleDeg?: number;
+      batSpeedMph?: number; swingPathTiltDeg?: number;
+      attackDirectionDeg?: number; attackAngleDeg?: number;
+    };
+  };
+}
+
+// ----------------- small helpers -----------------
+function isFiniteNum(x: any): x is number { return typeof x === "number" && Number.isFinite(x); }
+function num(x: any): number | undefined {
+  if (x == null) return undefined;
+  if (typeof x === "number" && Number.isFinite(x)) return x;
+  const n = Number(x);
+  return Number.isFinite(n) ? n : undefined;
+}
+function str(x: any): string | undefined {
+  if (typeof x === "string") return x;
+  if (x == null) return undefined;
+  try { return String(x); } catch { return undefined; }
+}
+function firstDefined<T>(...vals: (T | undefined)[]): T | undefined {
+  for (const v of vals) if (v !== undefined) return v;
+  return undefined;
+}
+function mphFromAny(mph?: number, ms?: number, kph?: number): number | undefined {
+  if (isFiniteNum(mph)) return mph;
+  if (isFiniteNum(ms)) return ms * 2.236936;
+  if (isFiniteNum(kph)) return kph * 0.621371;
+  return undefined;
+}
+function feetFromAny(ft?: number, m?: number): number | undefined {
+  if (isFiniteNum(ft)) return ft;
+  if (isFiniteNum(m)) return m * 3.28084;
+  return undefined;
+}
+function asRL(x?: string): "R"|"L"|"?"
+{
+  if (!x) return "?";
+  const t = x.trim().toUpperCase();
+  if (t.startsWith("R")) return "R";
+  if (t.startsWith("L")) return "L";
+  return "?";
+}
+function normRole(x?: string): "pitcher"|"batter"|"hitter"|"unknown" {
+  const s = (x || "").toLowerCase();
+  if (s.includes("pitch")) return "pitcher";
+  if (s.includes("bat")) return "batter";
+  if (s.includes("hit")) return "hitter";
+  return "unknown";
+}
+function safeArray(a: any): any[] { return Array.isArray(a) ? a : []; }
+function lowerLettersOnly(s: string): string { return s.replace(/[^a-z]/gi, "").toLowerCase(); }
+
+// ----------------- player & event extraction -----------------
+interface PlayerMeta {
+  id?: string | number;
+  name?: string;
+  role?: "pitcher"|"batter"|"hitter"|"unknown";
+  throwing?: "R"|"L"|"?"
+  batting?: "R"|"L"|"?"
+}
+
+function extractPlayers(root: any): PlayerMeta[] {
+  // common paths to player arrays
+  const paths: any[][] = [
+    safeArray(root?.players),
+    safeArray(root?.details?.players),
+    safeArray(root?.metadata?.players),
+    safeArray(root?.people),
+  ];
+
+  const out: PlayerMeta[] = [];
+  for (const arr of paths) {
+    for (const p of safeArray(arr)) {
+      const roleStr = str(p?.role?.name) || str(p?.role) || str(p?.position) || str(p?.type);
+      const role = normRole(roleStr);
+      const id = firstDefined(str(p?.id), str(p?.personId), str(p?.uuid), str(p?.uid)) ?? p?.id ?? p?.personId;
+      const name = firstDefined(str(p?.name),
+                                [p?.firstName, p?.lastName].filter(Boolean).join(" ") || undefined,
+                                str(p?.playerName));
+      const throwing = asRL(firstDefined(str(p?.handedness?.throwing), str(p?.throwingHand)));
+      const batting   = asRL(firstDefined(str(p?.handedness?.batting), str(p?.battingHand)));
+      out.push({ id, name, role, throwing, batting });
+    }
+  }
+  // best-effort uniqueness by id+role+name tuple
+  const seen = new Set<string>();
+  return out.filter(p => {
+    const key = `${p.id ?? "?"}|${p.role}|${p.name ?? "?"}|${p.throwing ?? "?"}|${p.batting ?? "?"}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function findPitchEvent(root: any): any | undefined {
+  const lists = [
+    safeArray(root?.events),
+    safeArray(root?.details?.events),
+    safeArray(root?.timeline?.events),
+  ];
+  for (const arr of lists) {
+    const found = arr.find((e: any) => String(e?.type || e?.eventType || "").toUpperCase().includes("PITCH"));
+    if (found) return found;
+  }
+  return undefined;
+}
+
+function findContactEvent(root: any): any | undefined {
+  const lists = [
+    safeArray(root?.events),
+    safeArray(root?.details?.events),
+    safeArray(root?.timeline?.events),
+  ];
+  for (const arr of lists) {
+    const found = arr.find((e: any) => String(e?.type || e?.eventType || "").toLowerCase().includes("contact"));
+    if (found) return found;
+  }
+  return undefined;
+}
+
+// ----------------- skeleton extraction -----------------
+// We expect various shapes. The most common (from your sample history):
+//   root.samples.people[] -> each has { role, name, joints: Array<FrameLike> }
+// where each "joints" entry is an object mapping "jointName" => [x,y,z], and may include a "time" field.
+//
+// We also accept alternative shapes: root.people[].joints, root.tracks[].frames, root.frames[].people[].
+
+function extractSamplePeople(root: any): any[] {
+  // prioritize 'samples.people' per your files
+  if (Array.isArray(root?.samples?.people)) return root.samples.people;
+  // some variants
+  if (Array.isArray(root?.people) && root?.samples) {
+    // sometimes people at root have 'joints' too
+    return root.people;
+  }
+  // fallback: gather any array entries that carry .joints
+  const candidates: any[] = [];
+  function scan(node: any) {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const v of node) scan(v);
+      return;
+    }
+    if (Array.isArray(node.joints)) candidates.push(node);
+    for (const k of Object.keys(node)) scan(node[k]);
+  }
+  scan(root);
+  return candidates.length ? candidates : [];
+}
+
+function extractTimesFromPerson(person: any, fpsDefault = 120): number[] | undefined {
+  // Accept embedded time per joint frame OR separated times arrays
+  const j = safeArray(person?.joints);
+  if (!j.length) return undefined;
+
+  // embedded 'time'
+  const hasEmbedded = j.some((f: any) => isFiniteNum(num(f?.time)));
+  if (hasEmbedded) {
+    return j.map((f: any, i: number) => num(f?.time) ?? (i / fpsDefault));
+  }
+  // sometimes there is a parallel array of timestamps
+  const tPaths = [
+    safeArray(person?.times),
+    safeArray(person?.timestamps),
+    safeArray(person?.jointTimes),
+    safeArray(person?.jointsTimes),
+  ];
+  for (const arr of tPaths) {
+    if (arr.length && isFiniteNum(num(arr[0]))) {
+      return arr.map((x: any, i: number) => num(x) ?? (i / fpsDefault));
+    }
+  }
+  // possibly available at root
+  const fps = num(person?.fps) ?? num(person?.frameRate) ?? fpsDefault;
+  return j.map((_: any, i: number) => i / (fps || fpsDefault));
+}
+
+const JOINT_ALIASES: Record<string, string[]> = {
+  head: ["head","topHead","top_of_head","skull","cranium","nose"],
+  neck: ["neck","c7","neckBase","baseNeck"],
+  chest: ["chest","midShoulder","upperChest","sternum","thorax"],
+  pelvis: ["midHip","pelvis","hipCenter","pelvisCenter","sacrum"],
+  lShoulder: ["lShoulder","leftShoulder","LShoulder"],
+  rShoulder: ["rShoulder","rightShoulder","RShoulder"],
+  lElbow: ["lElbow","leftElbow","LElbow"],
+  rElbow: ["rElbow","rightElbow","RElbow"],
+  lWrist: ["lWrist","leftWrist","LWrist"],
+  rWrist: ["rWrist","rightWrist","RWrist"],
+  lHip: ["lHip","leftHip","LHip"],
+  rHip: ["rHip","rightHip","RHip"],
+  lKnee: ["lKnee","leftKnee","LKnee"],
+  rKnee: ["rKnee","rightKnee","RKnee"],
+  lAnkle: ["lAnkle","leftAnkle","lHeel","leftHeel","lBigToe","leftBigToe","LAnkle"],
+  rAnkle: ["rAnkle","rightAnkle","rHeel","rightHeel","rBigToe","rightBigToe","RAnkle"],
+};
+
+function pickJointMap(frameObj: any): Record<string, V3> {
+  const out: Record<string, V3> = {};
+  // direct keys already in desired names
+  for (const k of Object.keys(frameObj || {})) {
+    const v = frameObj[k];
+    if (Array.isArray(v) && v.length === 3 && v.every(Number.isFinite)) {
+      out[k] = [v[0], v[1], v[2]];
+    }
+  }
+  // fill aliases into canonical keys if not present
+  for (const canon of Object.keys(JOINT_ALIASES)) {
+    if (out[canon]) continue;
+    const alist = JOINT_ALIASES[canon];
+    for (const a of alist) {
+      const v = frameObj?.[a];
+      if (Array.isArray(v) && v.length === 3 && v.every(Number.isFinite)) {
+        out[canon] = [v[0], v[1], v[2]];
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+// Build frames[] from a "person" node carrying joints[]
+function framesFromPerson(person: any): Array<{time:number; joints: Record<string,V3>}> {
+  const joints = safeArray(person?.joints);
+  if (!joints.length) return [];
+  const times = extractTimesFromPerson(person) ?? joints.map((_: any, i: number) => i / 120);
+  const frames: Array<{time:number; joints: Record<string,V3>}> = [];
+  for (let i = 0; i < joints.length; i++) {
+    const f = joints[i];
+    // Each 'f' should be an object mapping jointName -> [x,y,z]; ignore non-triplet entries
+    const jMap = pickJointMap(f);
+    frames.push({ time: times[i] ?? (i / 120), joints: jMap });
+  }
+  return frames;
+}
+
+// ----------------- metrics extraction -----------------
+function extractPitchMetrics(root: any): { velocityMph?: number; ivb?: number; hb?: number; extensionFt?: number } | undefined {
+  const pitchEvt = findPitchEvent(root);
+  if (!pitchEvt) {
+    // sometimes metrics live directly in a summary node
+    const m = root?.pitch || root?.details?.pitch || root?.metrics || root?.summary?.pitch;
+    if (m) {
+      const velocityMph = mphFromAny(num(m?.velocityMph), num(m?.velocityMs), num(m?.velocityKph));
+      const ivb = num(m?.ivb ?? m?.inducedVerticalBreak ?? m?.verticalBreak);
+      const hb  = num(m?.hb ?? m?.horizontalBreak);
+      const extensionFt = feetFromAny(num(m?.extensionFt), num(m?.extensionM));
+      if (velocityMph || ivb || hb || extensionFt) return { velocityMph, ivb, hb, extensionFt };
+    }
+    return undefined;
+  }
+
+  // Common vendor nesting
+  const start = pitchEvt?.start || pitchEvt?.ball?.start || pitchEvt?.release || pitchEvt?.data;
+  const speed = start?.speed || pitchEvt?.speed || pitchEvt?.ball?.speed;
+  const deviation = pitchEvt?.deviation || pitchEvt?.movement || pitchEvt?.break;
+
+  const velocityMph = mphFromAny(
+    num(speed?.mph), num(speed?.mps ?? speed?.ms), num(speed?.kph ?? speed?.kmh ?? speed?.kmph)
+  );
+  const ivb = firstDefined(num(deviation?.ivb), num(deviation?.vertical), num(deviation?.verticalInches));
+  const hb  = firstDefined(num(deviation?.hb),  num(deviation?.horizontal), num(deviation?.horizontalInches));
+  const extensionFt = feetFromAny(num(start?.extensionFt), num(start?.extensionM));
+
+  return { velocityMph, ivb, hb, extensionFt };
+}
+
+function extractSwingMetrics(root: any): {
+  exitVelocityMph?: number; launchAngleDeg?: number;
+  batSpeedMph?: number; swingPathTiltDeg?: number;
+  attackDirectionDeg?: number; attackAngleDeg?: number;
+} | undefined {
+  const contactEvt = findContactEvent(root);
+  const batted = root?.battedBall || root?.summary?.battedBall || root?.details?.battedBall;
+  if (!contactEvt && !batted) return undefined;
+
+  const ev_mph = mphFromAny(
+    num(batted?.exitVelocityMph),
+    num(contactEvt?.exitVelocityMph),
+    // convert m/s or kph if present
+    num(batted?.exitVelocityMs) ?? num(contactEvt?.exitVelocityMs),
+    num(batted?.exitVelocityKph) ?? num(contactEvt?.exitVelocityKph)
+  );
+  const la = firstDefined(num(batted?.launchAngleDeg), num(contactEvt?.launchAngleDeg), num(batted?.launchAngle), num(contactEvt?.launchAngle));
+
+  // Bat speed: prefer mph; else ms/kph -> mph
+  const bs_mph = mphFromAny(
+    num(batted?.batSpeedMph), num(contactEvt?.batSpeedMph),
+    num(batted?.batSpeedMs) ?? num(contactEvt?.batSpeedMs),
+    num(batted?.batSpeedKph) ?? num(contactEvt?.batSpeedKph)
+  );
+  const tilt = firstDefined(num(batted?.swingPathTiltDeg), num(contactEvt?.swingPathTiltDeg), num(batted?.swingPathTilt));
+  const attackDir = firstDefined(num(batted?.attackDirectionDeg), num(contactEvt?.attackDirectionDeg), num(batted?.attackDirection));
+  const attackAng = firstDefined(num(batted?.attackAngleDeg), num(contactEvt?.attackAngleDeg), num(batted?.attackAngle));
+
+  if (ev_mph || la || bs_mph || tilt || attackDir || attackAng) {
+    return {
+      exitVelocityMph: ev_mph,
+      launchAngleDeg: la,
+      batSpeedMph: bs_mph,
+      swingPathTiltDeg: tilt,
+      attackDirectionDeg: attackDir,
+      attackAngleDeg: attackAng,
+    };
+  }
+  return undefined;
+}
+
+// ----------------- top-level -----------------
+export function parseHawkEyeJson(root: any): ParsedTrack[] {
+  try {
+    const people = extractSamplePeople(root);
+    const players = extractPlayers(root);
+    const pitch = extractPitchMetrics(root);
+    const swing = extractSwingMetrics(root);
+
+    const tracks: ParsedTrack[] = [];
+
+    for (const person of people) {
+      const frames = framesFromPerson(person);
+      if (!frames.length) continue;
+
+      const roleRaw = str(person?.role?.name) || str(person?.role) || str(person?.type) || str(person?.label);
+      const role = normRole(roleRaw);
+      const pid = firstDefined(person?.id, person?.personId, person?.uuid, person?.uid, person?.trackId);
+      const pname = firstDefined(str(person?.name), str(person?.personName), str(person?.displayName));
+
+      // match to players[] by id or role to enrich name/handedness
+      let match: PlayerMeta | undefined;
+      if (pid != null) {
+        match = players.find(p => (str(p.id) || p.id) == (str(pid) || pid)) || players.find(p => p.role === role);
+      } else {
+        match = players.find(p => p.role === role) || players[0];
+      }
+
+      const handed = {
+        throwing: match?.throwing ?? asRL(str(person?.throwingHand)),
+        batting: match?.batting ?? asRL(str(person?.battingHand)),
+      };
+
+      // Per-role meta: pitcher gets pitch metrics; batter gets swing metrics as well
+      const meta: any = {};
+      if (pitch && (role === "pitcher" || role === "unknown")) meta.pitch = pitch;
+      if (swing && (role === "batter" || role === "hitter")) meta.swing = swing;
+
+      tracks.push({
+        role: role,
+        name: match?.name || pname,
+        personId: match?.id ?? pid,
+        handedness: handed,
+        frames,
+        meta,
+      });
+    }
+
+    // If we still have nothing, try a last-ditch structure: root.tracks[].frames[] with frame.joints
+    if (!tracks.length && Array.isArray(root?.tracks)) {
+      for (const t of root.tracks) {
+        const frames: Array<{time:number; joints: Record<string,V3>}> = [];
+        const arr = safeArray(t?.frames);
+        const times = safeArray(t?.times);
+        for (let i = 0; i < arr.length; i++) {
+          const fr = arr[i];
+          const jm = pickJointMap(fr?.joints || fr);
+          const time = isFiniteNum(num(fr?.time)) ? (num(fr.time) as number)
+                     : (isFiniteNum(num(times[i])) ? (num(times[i]) as number) : (i / 120));
+          if (Object.keys(jm).length) frames.push({ time, joints: jm });
+        }
+        if (frames.length) {
+          const role = normRole(str(t?.role) || str(t?.type));
+          tracks.push({
+            role,
+            name: str(t?.name),
+            personId: firstDefined(t?.id, t?.personId, t?.uuid),
+            handedness: { throwing: "?", batting: "?" },
+            frames,
+            meta: { pitch, swing },
+          });
+        }
+      }
+    }
+
+    return tracks;
+  } catch (e) {
+    // Fail safe
+    console.warn("parseHawkEyeJson error:", e);
+    return [];
+  }
+}

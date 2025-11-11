@@ -1,0 +1,26 @@
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Hawk‑Eye 3D Visualizer v9a</title>
+    <style>
+      :root{ color-scheme: dark light; }
+      body{ margin:0; background:#0b1020; color:#e6edf6; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+      .toolbar{ display:flex; gap:8px; align-items:center; padding:10px 12px; border-bottom:1px solid #1e293b; position:sticky; top:0; background:#0b1020; z-index:10; }
+      .panel{ width:320px; border-right:1px solid #1e293b; padding:12px; display:flex; flex-direction:column; gap:8px; }
+      .btn{ padding:8px 12px; border-radius:10px; border:1px solid #1e293b; background:#0f172a; color:#e2e8f0; cursor:pointer; }
+      .btn:disabled{ opacity:.5; cursor:not-allowed; }
+      select,input{ background:#0f172a; color:#e2e8f0; border:1px solid #1e293b; border-radius:8px; padding:6px 8px; width:100%; }
+      .metrics{ display:grid; grid-template-columns: 1fr 1fr; gap:6px; font-size:13px; }
+      .layout{ display:grid; grid-template-columns: 320px 1fr; min-height: calc(100vh - 50px); }
+      .main{ position:relative; }
+      .status{ font-size:12px; opacity:.85; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
