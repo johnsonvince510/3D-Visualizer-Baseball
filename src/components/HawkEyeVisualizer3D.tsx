@@ -93,6 +93,45 @@ const BONES: [number, number][] = [
 const HOME_BASE = new THREE.Vector3(-1, 0, 0); // pitcher->catcher along -X
 const SMOOTH_ALPHA = 0.35;
 
+function normalizeRoleForTrack(raw: any): string {
+  if (raw == null) return "unknown";
+
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed) return "unknown";
+    const lower = trimmed.toLowerCase();
+    if (lower.includes("pitch")) return "pitcher";
+    if (lower.includes("batter")) return "batter";
+    if (lower.includes("hitter")) return "hitter";
+    if (lower.includes("bat")) return "batter";
+    if (lower === "p") return "pitcher";
+    if (lower === "h" || lower === "rh" || lower === "lh") return "hitter";
+    if (lower === "b") return "batter";
+    return lower;
+  }
+
+  if (typeof raw === "number" || typeof raw === "boolean") {
+    return normalizeRoleForTrack(String(raw));
+  }
+
+  if (typeof raw === "object") {
+    return normalizeRoleForTrack(
+      raw.name ??
+        raw.label ??
+        raw.title ??
+        raw.description ??
+        raw.heId ??
+        raw.abbr ??
+        raw.code ??
+        raw.type ??
+        raw.id ??
+        ""
+    );
+  }
+
+  return "unknown";
+}
+
 function wrap180(d: number) {
   if (!isFinite(d)) return d;
   while (d > 180) d -= 360;
@@ -623,6 +662,10 @@ async function onFiles(fs: FileList | null) {
     }
   }
 
+  all.forEach((t) => {
+    (t as any).role = normalizeRoleForTrack((t as any).role);
+  });
+
   // Your visualizer only wants pitcher/hitter roles
   const playable = all.filter((t) =>
     ["pitcher", "hitter", "batter"].includes(String(t.role || "").toLowerCase())
@@ -648,177 +691,6 @@ async function onFiles(fs: FileList | null) {
   setTi(0);
   setFi(0);
   setDebug(`Loaded ${playable.length} track(s).`);
-}
-
-
-// ---- Lift names ----
-try {
-  const players = Array.isArray(obj?.players) ? obj.players :
-                  Array.isArray(obj?.details?.players) ? obj.details.players : null;
-  if (players) {
-    const pit = players.find((p:any)=> (p?.role?.name||"").toLowerCase()==="pitcher") || players.find((p:any)=> ["pitcher"].includes((p?.role?.name||"").toLowerCase()));
-    const bat = players.find((p:any)=> (p?.role?.name||"").toLowerCase() in {batter:1,hitter:1}) || players.find((p:any)=> ["batter","hitter"].includes((p?.role?.name||"").toLowerCase()));
-    setPitcherName(pit?.name || pit?.fullName || pit?.displayName || null);
-    setBatterName(bat?.name || bat?.fullName || bat?.displayName || null);
-  }
-} catch {}
-
-// ---- Lift pitch & hit metrics (robust over many vendor keys) ----
-function firstNum(...vals: any[]) { for(const v of vals){ const n = Number(v); if(Number.isFinite(n)) return n; } return null; }
-function mph(ms:number|null){ return (ms==null)?null : (ms*2.23694); }
-function ivbInches(m:number|null){ return (m==null)?null : (m*39.3701); }
-function hbInches(m:number|null){ return (m==null)?null : (m*39.3701); }
-function feet(v:number|null){ return (v==null)?null : (v*3.28084); }
-
-const eventsArr = Array.isArray(obj?.events) ? obj.events :
-                  Array.isArray(obj?.details?.events) ? obj.details.events : [];
-
-const pitchEvt = eventsArr.find((e:any)=> String(e?.type||"").toUpperCase()==="PITCH") || {};
-const contactEvt = eventsArr.find((e:any)=> String(e?.type||"").toUpperCase()==="CONTACT") || {};
-
-const pitchRoot = obj?.pitch || obj?.details?.pitch || obj?.metrics || obj?.trackman || {};
-const movement  = pitchRoot?.movement || pitchEvt?.movement || {};
-
-const vel = firstNum(pitchRoot.releaseSpeed, pitchRoot.releaseVelocity, pitchEvt.releaseSpeed, pitchEvt.releaseVelocity, pitchRoot.pitchVelocity);
-const ivb = firstNum(pitchRoot.inducedVerticalBreak, movement.inducedVerticalBreak, pitchEvt.inducedVerticalBreak);
-const hb  = firstNum(pitchRoot.horizontalBreak, movement.horizontalBreak, pitchEvt.horizontalBreak, pitchRoot.hBreak);
-const ext = firstNum(pitchRoot.extension, pitchRoot.releaseExtension, pitchEvt.extension);
-
-setPitchVelocity(vel!=null ? Number(vel) : null);
-setPitchIVB(ivb!=null ? Number(ivb) : null);
-setPitchHB(hb!=null ? Number(hb) : null);
-setPitchExt(ext!=null ? Number(ext) : null);
-
-const bb = obj?.battedBall || obj?.details?.battedBall || contactEvt || {};
-const ev  = firstNum(bb.exitVelocityMph, bb.exitVeloMph, bb.exitVelocity, contactEvt.exitVelocityMph, contactEvt.exitVelocity);
-const la  = firstNum(bb.launchAngle, bb.launchAngleDeg, contactEvt.launchAngle, contactEvt.launchAngleDeg);
-const bs  = firstNum(bb.batSpeedMph, bb.batSpeed, contactEvt.batSpeedMph);
-const spt = firstNum(bb.swingPathTilt, bb.swingPathTiltDeg, contactEvt.swingPathTilt, contactEvt.swingPathTiltDeg);
-const ad  = firstNum(bb.attackDirection, bb.attackDirectionDeg, contactEvt.attackDirection, contactEvt.attackDirectionDeg);
-const aa  = firstNum(bb.attackAngle, bb.attackAngleDeg, contactEvt.attackAngle, contactEvt.attackAngleDeg);
-
-setEvMph(ev!=null? Number(ev): null);
-setLaDeg(la!=null? Number(la): null);
-setBatSpeedMph(bs!=null? Number(bs): null);
-setSwingPathTiltDeg(spt!=null? Number(spt): null);
-setAttackDirDeg(ad!=null? Number(ad): null);
-setAttackAngleDeg(aa!=null? Number(aa): null);
-
-// Attach pitchMeta per track so switching tracks keeps constants
-if (Array.isArray(parsed)) {
-  for (const __t of parsed as any[]) {
-    (__t as any).pitchMeta = {
-      velocity: vel ?? null,
-      ivb: ivb ?? null,
-      hb: hb ?? null,
-      extension: ext ?? null,
-    };
-  }
-}
-// Try to lift pitch metrics if present (do not vary during playback)
-        const pitch = obj?.pitch || obj?.details?.pitch || obj?.metrics || obj?.trackman || {};
-        const pitchMeta = {
-          velocity: pitch.releaseSpeed ?? pitch.releaseVelocity ?? pitch.pitchVelocity ?? null,
-          ivb: pitch.inducedVerticalBreak ?? pitch.ivb ?? null,
-          hb: pitch.horizontalBreak ?? pitch.hBreak ?? null,
-          extension: pitch.extension ?? pitch.releaseExtension ?? null,
-        };
-
-        if (Array.isArray(parsed)) {
-          for (const __t of parsed as any[]) {
-            (__t as any)._handFromJson = "?";
-            (__t as any).pitchMeta = pitchMeta;
-          }
-        }
-
-        // Throwing handedness from players[] (prefer Pitcher)
-        let throwHand: "R" | "L" | "?" = "?";
-        try {
-          const players =
-            (Array.isArray((obj as any).players) && (obj as any).players) ||
-            (Array.isArray((obj as any).details?.players) && (obj as any).details.players) ||
-            null;
-          if (players) {
-            const pitcher = players.find(
-              (p: any) => (p?.role?.name || "").toString().toLowerCase() === "pitcher"
-            ) || players[0];
-            const throwing = pitcher?.handedness?.throwing as string | undefined;
-            if (throwing) {
-              const t = throwing.toUpperCase();
-              if (t.startsWith("R")) throwHand = "R";
-              else if (t.startsWith("L")) throwHand = "L";
-            }
-          }
-        } catch { /* ignore */ }
-
-        for (const t of parsed) {
-          (t as any)._handFromJson = (t as any)._handFromJson !== "?" ? (t as any)._handFromJson : throwHand;
-          (t as any)._releaseSeconds = extractReleaseSecondsFromJson(obj);
-        }
-
-        
-        // Attach names and metrics directly to each track for UI
-        const {pitcherName, batterName} = extractNames(obj);
-        const pitchM = extractPitchMetrics(obj);
-        const batM = extractBatMetrics(obj);
-        if (Array.isArray(parsed)) {
-          for (const t of parsed as any[]) {
-            if (!(t as any).meta) (t as any).meta = {};
-            (t as any).meta.pitcherName = pitcherName ?? (t as any).meta?.pitcherName;
-            (t as any).meta.batterName  = batterName  ?? (t as any).meta?.batterName;
-            (t as any).meta.pitch      = pitchM;
-            (t as any).meta.battedBall = batM;
-          }
-        }
-        all.push(...parsed);
-    
-} catch (e: any) {
-        setDebug(`Parse error in ${f.name}: ${String(e.message || e)}`);
-      }
-    }
-
-    // NEW (accept any track that actually has frames)
-    const playable = all.filter((t: any) => Array.isArray(t.frames) && t.frames.length > 0);
-    if (!playable.length) {
-  const summary = all.map((t: any, i: number) => {
-    const role = String(t?.role ?? "unknown");
-    const n = Array.isArray(t?.frames) ? t.frames.length : 0;
-    return `#${i}: role=${role}, frames=${n}, name=${t?.name ?? "?"}`;
-  }).join(" | ");
-  setDebug(
-    `No playable tracks after filter. Received ${all.length} parsed track(s).\n` +
-    (summary ? `Tracks: ${summary}` : "Tracks: <none>")
-  );
-  setTracks([]);
-  return;
-    }
-
-    const hs: Record<number,"R"|"L"|"?"> = {};
-    playable.forEach((t: any, i: number) => {
-      const jsonH = (t as any)._handFromJson as "R"|"L"|"?";
-      const auto = detectHandedness(t.frames || []);
-      const metaHand = (t.handedness || t.hand || t.pitchHand || t.bats || "").toString().toUpperCase();
-      const meta = metaHand.startsWith("R") ? "R" : metaHand.startsWith("L") ? "L" : "?";
-      hs[i] = jsonH !== "?" ? jsonH : (auto !== "?" ? auto : meta);
-    });
-
-    setHands(hs);
-    setTracks(playable);
-    setTi(0);
-    setFi(0);
-
-    // Set constant pitch metrics from first track (or selected later)
-    const pm = (playable[0]?.pitchMeta) || {};
-    setPitchVelocity(pm.velocity ?? null);
-    setPitchIVB(pm.ivb ?? null);
-    setPitchHB(pm.hb ?? null);
-    setPitchExt(pm.extension ?? null);
-
-    // Force FS/BR to fixed user-requested markers
-    setFsIdx(FS_DEFAULT);
-    setBrIdx(BR_DEFAULT);
-
-    setDebug(`Loaded ${playable.length} track(s).`);
   }
 
   const frames = useMemo(() => tracks[ti]?.frames ?? [], [tracks, ti]);
@@ -1372,9 +1244,18 @@ if (Array.isArray(parsed)) {
           onChange={(e) => { setTi(+e.target.value); setFi(0); }}
           style={{ background: "#0f172a", color: "#e2e8f0", border: "1px solid #1e293b", borderRadius: 8, padding: "6px 8px" }}
         >
-          {tracks.map((t: any, i: number) => (
-            <option key={i} value={i}>[{t.role}] {t.name ?? t.personId ?? t.trackId ?? `Track ${i + 1}`}</option>
-          ))}
+          {tracks.map((t: any, i: number) => {
+            const roleText =
+              typeof t.role === "string" && t.role.length
+                ? t.role.charAt(0).toUpperCase() + t.role.slice(1)
+                : "Unknown";
+            const label = t.name ?? t.personId ?? t.trackId ?? `Track ${i + 1}`;
+            return (
+              <option key={i} value={i}>
+                [{roleText}] {label}
+              </option>
+            );
+          })}
         </select>
 
         <div style={{ display: "flex", gap: 8, fontSize: 12, opacity: 0.85, alignItems:"center", flexWrap:"wrap" }}>
