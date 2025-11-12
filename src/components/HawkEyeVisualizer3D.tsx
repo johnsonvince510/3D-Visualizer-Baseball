@@ -671,6 +671,22 @@ async function onFiles(fs: FileList | null) {
     ["pitcher", "hitter", "batter"].includes(String(t.role || "").toLowerCase())
   );
 
+  const normalizedTracks = playable.map((t, idx) => {
+    const role = normalizeRoleForTrack((t as any).role);
+    const roleLabel = roleLabelFromRole(role);
+    const displayLabel = buildTrackDisplayLabel(t, idx, roleLabel);
+
+    return {
+      ...t,
+      role,
+      _roleLabel: roleLabel,
+      _displayLabel: displayLabel,
+    } as typeof t & {
+      _roleLabel: string;
+      _displayLabel: string;
+    };
+  });
+
   if (!playable.length) {
     setDebug("No tracks found (expected samples.people[].joints with role pitcher|hitter).");
     setTracks([]);
@@ -679,7 +695,7 @@ async function onFiles(fs: FileList | null) {
 
   // Derive throwing/batting hand — keep your previous logic
   const hs: Record<number, "R" | "L" | "?"> = {};
-  playable.forEach((t: any, i: number) => {
+  normalizedTracks.forEach((t: any, i: number) => {
     const auto = detectHandedness(t.frames || []);
     const metaHand = (t.handedness || t.hand || t.pitchHand || t.bats || "").toString().toUpperCase();
     const meta = metaHand.startsWith("R") ? "R" : metaHand.startsWith("L") ? "L" : "?";
@@ -687,7 +703,7 @@ async function onFiles(fs: FileList | null) {
   });
 
   setHands(hs);
-  setTracks(playable);
+  setTracks(normalizedTracks);
   setTi(0);
   setFi(0);
   setDebug(`Loaded ${playable.length} track(s).`);
