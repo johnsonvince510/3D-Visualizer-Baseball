@@ -132,94 +132,6 @@ function normalizeRoleForTrack(raw: any): string {
   return "unknown";
 }
 
-function coerceToLabel(raw: any): string | null {
-  if (raw == null) return null;
-
-  if (typeof raw === "string") {
-    const trimmed = raw.trim();
-    return trimmed.length ? trimmed : null;
-  }
-
-  if (typeof raw === "number" || typeof raw === "boolean" || typeof raw === "bigint") {
-    return String(raw);
-  }
-
-  if (Array.isArray(raw)) {
-    const joined = raw
-      .map((part) => coerceToLabel(part))
-      .filter((part): part is string => Boolean(part && part.trim().length))
-      .join(" ");
-    return joined.trim().length ? joined : null;
-  }
-
-  if (typeof raw === "object") {
-    const candidateKeys = [
-      "displayName",
-      "fullName",
-      "name",
-      "label",
-      "title",
-      "description",
-      "heId",
-      "abbr",
-      "code",
-      "type",
-      "id",
-    ];
-
-    for (const key of candidateKeys) {
-      if (Object.prototype.hasOwnProperty.call(raw, key)) {
-        const coerced = coerceToLabel((raw as any)[key]);
-        if (coerced) return coerced;
-      }
-    }
-
-    try {
-      const json = JSON.stringify(raw);
-      return json && json !== "{}" ? json : null;
-    } catch {
-      return null;
-    }
-  }
-
-  try {
-    return String(raw);
-  } catch {
-    return null;
-  }
-}
-
-function roleLabelFromRole(role: string | null | undefined): string {
-  if (!role) return "Unknown";
-  const normalized = normalizeRoleForTrack(role);
-  const trimmed = normalized.trim();
-  return trimmed.length ? trimmed.charAt(0).toUpperCase() + trimmed.slice(1) : "Unknown";
-}
-
-function buildTrackDisplayLabel(raw: any, index: number, roleLabel: string): string {
-  const fallback = `[${roleLabel}] Track ${index + 1}`;
-  const candidates = [
-    raw?._displayLabel,
-    raw?._optionLabel,
-    raw?.name,
-    raw?.displayName,
-    raw?.fullName,
-    raw?.personId,
-    raw?.trackId,
-    raw?._pitcherName,
-    raw?._batterName,
-  ];
-
-  for (const candidate of candidates) {
-    const label = coerceToLabel(candidate);
-    if (label) {
-      return `[${roleLabel}] ${label}`;
-    }
-  }
-
-  return fallback;
-}
-
 function wrap180(d: number) {
   if (!isFinite(d)) return d;
   while (d > 180) d -= 360;
@@ -1349,16 +1261,15 @@ async function onFiles(fs: FileList | null) {
           style={{ background: "#0f172a", color: "#e2e8f0", border: "1px solid #1e293b", borderRadius: 8, padding: "6px 8px" }}
         >
           {tracks.map((t: any, i: number) => {
-            const roleLabel = typeof (t as any)._roleLabel === "string" && (t as any)._roleLabel.length
-              ? (t as any)._roleLabel
-              : roleLabelFromRole((t as any).role);
-            const stored = (t as any)._displayLabel;
-            const safeLabel = typeof stored === "string" && stored.trim().length
-              ? stored
-              : buildTrackDisplayLabel(t, i, roleLabel);
-
+            const roleText =
+              typeof t.role === "string" && t.role.length
+                ? t.role.charAt(0).toUpperCase() + t.role.slice(1)
+                : "Unknown";
+            const label = t.name ?? t.personId ?? t.trackId ?? `Track ${i + 1}`;
             return (
-              <option key={i} value={i}>{safeLabel}</option>
+              <option key={i} value={i}>
+                [{roleText}] {label}
+              </option>
             );
           })}
         </select>
